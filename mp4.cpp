@@ -1,17 +1,29 @@
 #include "mp4.h"
 
+#include <stdlib.h>
 #include <iostream>
 
-int main(int argc, char *argv[]) {
-    auto boxes = mov::Mp4Paser::parse(argv[1]);
-
+void dumpBox(const mov::Box::Boxes &boxes, int depth = 0) {
     for (const auto &box : boxes) {
-        std::cout << "type " << box->baseTypeStr()
-        << ", offset " << box->offset()
-        << ", size " << box->size()
-        << ", " << box->detail()
-        << '\n';
+        std::cout << std::string(depth, '\t')
+                  << "type " << box->baseTypeStr()
+                  << ", offset " << box->offset()
+                  << ", size " << box->size()
+                  << ", " << box->detail()
+                  << '\n';
+        if (box->hasChild()) {
+            dumpBox(box->children(), depth + 1);
+        }
     }
+}
 
-    return 0;
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        std::cout << "usage: " << argv[0] << " file.mp4\n";
+        return EXIT_FAILURE;
+    }
+    auto boxes = mov::Mp4Paser::parse(argv[1]);
+    dumpBox(boxes);
+
+    return EXIT_SUCCESS;
 }

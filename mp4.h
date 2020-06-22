@@ -12,14 +12,30 @@
 
 namespace mov {
 
-static uint32_t buf2UInt32(uint8_t *buf) {
-    return (uint32_t)buf[0] << 24 | (uint32_t)buf[1] << 16 | (uint32_t)buf[2] << 8 | buf[3];
+static constexpr uint16_t buf2UInt16(uint8_t *buf) {
+    return (uint16_t)buf[0] << 8U | buf[1];
 }
 
-static uint64_t buf2UInt64(uint8_t *buf) {
+static constexpr uint32_t buf2UInt32(uint8_t *buf) {
+    return (uint32_t)buf[0] << 24U | (uint32_t)buf[1] << 16U | (uint32_t)buf[2] << 8U | buf[3];
+}
+
+static constexpr uint64_t buf2UInt64(uint8_t *buf) {
     uint64_t high = buf2UInt32(buf);
-    uint64_t low = buf2UInt32(buf + 4);
+    int64_t low = buf2UInt32(buf + 4);
     return high + low;
+}
+
+static std::string sec2Str(int64_t sec) {
+    std::ostringstream ss;
+    if (sec > 3600) {
+        ss << sec / 3600 << " hour, ";
+    }
+    if (sec > 60) {
+        ss << (sec % 3600) / 60 << " min, ";
+    }
+    ss << sec % 60 << " sec";
+    return ss.str();
 }
 
 class FileOp {
@@ -49,6 +65,14 @@ public:
         return fseeko(file_, offset, whence);
     }
 
+    std::optional<uint16_t> readAsBigU16() {
+        uint8_t buf[2];
+        if (!read(buf, sizeof(buf), 1)) {
+            return std::optional<uint16_t>();
+        }
+        return std::optional<uint16_t>(buf2UInt16(buf));
+    }
+
     std::optional<uint32_t> readAsBigU32() {
         uint8_t buf[4];
         if (!read(buf, sizeof(buf), 1)) {
@@ -70,11 +94,14 @@ private:
     FILE *file_;
 };
 
+class Box;
+std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base);
+
 class Box {
 public:
     using BaseType = std::array<char, 4>;
     using ExtendedType = std::array<char, 16>;
-    using Boxs = std::vector<std::shared_ptr<Box>>;
+    using Boxes = std::vector<std::shared_ptr<Box>>;
 
     class BoxBuilder {
     public:
@@ -102,8 +129,20 @@ public:
         return std::string(baseType.begin(), baseType.end());
     }
 
+    static uint32_t baseType2Tag(BaseType baseType) {
+        return buf2UInt32(reinterpret_cast<uint8_t*>(baseType.data()));
+    }
+
+    static uint32_t baseType2Uint32(BaseType baseType) {
+        return buf2UInt32(reinterpret_cast<uint8_t*>(baseType.data()));
+    }
+
     std::string baseTypeStr() {
         return baseType2str(type_);
+    }
+
+    uint32_t baseTypeTag() {
+        return baseType2Tag(type_);
     }
 
     static std::unique_ptr<Box> parseBasic(FileOp &in) {
@@ -136,7 +175,33 @@ public:
         return builder.build();
     }
 
+    bool parseFullBox(FileOp &file) {
+        auto data = file.readAsBigU32();
+        if (data.has_value()) {
+            fullbox_version_ = data.value() >> 24U;
+            fullbox_flag_ = data.value() & 0xFFFFFFU;
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     virtual void parseInternal(FileOp &file) {
+    }
+
+    void parseChild(FileOp &file) {
+        auto end = offset_ + size_;
+        while (file.tell() < end) {
+            auto box = parseBasic(file);
+            if (box == nullptr) {
+                return;
+            }
+            box->parent_ = this;
+            auto detailBox = toDetailType(std::move(box));
+            detailBox->parseInternal(file);
+            children_.push_back(detailBox);
+            file.seek(detailBox->offset() + detailBox->size(), SEEK_SET);
+        }
     }
 
     virtual std::string detail() {
@@ -159,23 +224,32 @@ public:
         return extended_type_;
     }
 
+    const Boxes &children() const {
+        return children_;
+    }
+
+    bool hasChild() {
+        return !children_.empty();
+    }
+
 protected:
     uint64_t size_ = 0;
     uint64_t offset_ = 0;
     BaseType type_{};
     ExtendedType extended_type_{};
 
-    Boxs children_;
+    uint8_t fullbox_version_ = 0;
+    uint32_t fullbox_flag_ = 0;
+
+    Boxes children_;
+    Box *parent_ = nullptr;
 };
 
 class Ftyp : public Box {
 public:
-    static const BaseType &type() {
-        static const auto t = str2BaseType("ftyp");
-        return t;
-    }
+    static const uint32_t tag_ = 'ftyp';
 
-    Ftyp(Box box) : Box(box) { }
+    Ftyp(const Box &box) : Box(box) { }
 
     void parseInternal(FileOp &file) override {
         auto remain = size_ - (file.tell() - offset_);
@@ -213,25 +287,405 @@ private:
     std::vector<BaseType> compatible_brands_{};
 };
 
-class Moov : public Box {
+class Mvhd : public Box {
 public:
-    static const BaseType &type() {
-        static const auto t = str2BaseType("moov");
-        return t;
-    }
+    static const uint32_t tag_ = 'mvhd';
 
-    Moov(Box box) : Box(box) {}
+    Mvhd(const Box &box) : Box(box) {}
 
     void parseInternal(FileOp &file) override {
+        if (!parseFullBox(file)) {
+            std::cerr << "parse mvhd failed\n";
+            return;
+        }
+        if (fullbox_version_ == 1) {
+            creation_time_ = file.readAsBigU64().value();
+            modification_time_ = file.readAsBigU64().value();
+            timescale_ = file.readAsBigU32().value();
+            duration_ = file.readAsBigU64().value();
+        } else {
+            creation_time_ = file.readAsBigU32().value();
+            modification_time_ = file.readAsBigU32().value();
+            timescale_ = file.readAsBigU32().value();
+            duration_ = file.readAsBigU32().value();
+        }
+        rate_ = (double)file.readAsBigU32().value() / (1U << 16U);
+        volume_ = (float)file.readAsBigU16().value() / (1U << 8U);
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "creation_time: " << creation_time_
+           << ", modification_time: " << modification_time_
+           << ", timescale: " << timescale_
+           << ", duration: " << duration_
+           << ", " << sec2Str(duration_ / timescale_)
+           << ", rate: " << rate_
+           << ", volume: " << volume_;
+        return ss.str();
+    }
+
+private:
+    uint64_t creation_time_ = 0;
+    uint64_t modification_time_ = 0;
+    uint32_t timescale_ = 0;
+    uint64_t duration_ = 0;
+    float rate_ = 1.0;
+    float volume_ = 1.0;
+};
+
+class Tkhd : public Box {
+public:
+    static const uint32_t tag_ = 'tkhd';
+
+    Tkhd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        if (fullbox_version_ == 1) {
+            creation_time_ = file.readAsBigU64().value();
+            modification_time_ = file.readAsBigU64().value();
+            track_id_ = file.readAsBigU32().value();
+            auto reserved = file.readAsBigU32();
+            duration_ = file.readAsBigU64().value();
+        } else {
+            creation_time_ = file.readAsBigU32().value();
+            modification_time_ = file.readAsBigU32().value();
+            track_id_ = file.readAsBigU32().value();
+            auto reserved = file.readAsBigU32();
+            duration_ = file.readAsBigU32().value();
+        }
+        file.readAsBigU64();
+        layer_ = file.readAsBigU16().value();
+        alternate_group_ = file.readAsBigU16().value();
+        volume_ = file.readAsBigU16().value() / (1 << 8);
+        file.seek(2 + 36, SEEK_CUR);
+        width_ = file.readAsBigU32().value() / (1 << 16);
+        height_ = file.readAsBigU32().value() / (1 << 16);
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "create: " << creation_time_
+           << ", modify: " << modification_time_
+           << ", id: " << track_id_
+           << ", dura: " << duration_
+           << ", layer: " << layer_
+           << ", alternate: " << alternate_group_
+           << ", volume: " << volume_
+           << ", width x height: " << width_ << " " << height_;
+        return ss.str();
+    }
+
+private:
+    uint64_t creation_time_ = 0;
+    uint64_t modification_time_ = 0;
+    uint32_t track_id_ = 0;
+    uint64_t duration_ = 0;
+    int16_t layer_ = 0;
+    int16_t alternate_group_ = 0;
+    int16_t volume_ = 0;
+    uint32_t width_ = 0;
+    uint32_t height_ = 0;
+};
+
+// Media Header
+class Mdhd : public Box {
+public:
+    static const uint32_t tag_ = 'mdhd';
+
+    Mdhd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        if (fullbox_version_ == 1) {
+            creation_time_ = file.readAsBigU64().value();
+            modification_time_ = file.readAsBigU64().value();
+            timescale_ = file.readAsBigU32().value();
+            duration_ = file.readAsBigU64().value();
+        } else {
+            creation_time_ = file.readAsBigU32().value();
+            modification_time_ = file.readAsBigU32().value();
+            timescale_ = file.readAsBigU32().value();
+            duration_ = file.readAsBigU32().value();
+        }
+        uint16_t lang = file.readAsBigU16().value();
+        lang_[0] = static_cast<char>((lang >> 10U) + 0x60);
+        lang_[1] = static_cast<char>(((lang >> 5U) & 0x1F) + 0x60);
+        lang_[2] = static_cast<char>((lang & 0x1F) + 0x60);
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "create: " << creation_time_
+           << ", modify: " << modification_time_
+           << ", timescale: " << timescale_
+           << ", dura: " << duration_
+           << ", " << sec2Str(duration_ / timescale_)
+           << ", lang: " << lang_;
+        return ss.str();
+    }
+
+private:
+    uint64_t creation_time_ = 0;
+    uint64_t modification_time_ = 0;
+    uint32_t timescale_ = 0;
+    uint64_t duration_ = 0;
+    char lang_[4] = {};
+};
+
+// Handler reference box
+class Hdlr : public Box {
+public:
+    static const uint32_t tag_ = 'hdlr';
+
+    Hdlr(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        file.readAsBigU32();
+        file.read(handler_type_.data(), handler_type_.size(), 1);
+        file.readAsBigU32();
+        file.readAsBigU64();
+        auto strSize = offset_ + size_ - file.tell();
+        name_.resize(strSize);
+        file.read(name_.data(), strSize, 1);
+        name_.back() = '\0';
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "handler type: " << baseType2str(handler_type_)
+           << ", name: " << name_.data();
+        return ss.str();
+    }
+private:
+    BaseType handler_type_{};
+    std::vector<char> name_;
+};
+
+/**
+ * Media Information Header: Video
+ */
+class Vmhd : public Box {
+public:
+    static const uint32_t tag_ = 'vmhd';
+
+    Vmhd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        graphics_mode_ = file.readAsBigU16().value();
+        opcolor_[0] = file.readAsBigU16().value();
+        opcolor_[1] = file.readAsBigU16().value();
+        opcolor_[2] = file.readAsBigU16().value();
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "graphics_mode: " << graphics_mode_
+        << ", opcolor: " << opcolor_[0] << ", " << opcolor_[1] << ", " << opcolor_[2];
+        return ss.str();
+    }
+
+private:
+    uint16_t graphics_mode_ = 0;
+    uint16_t opcolor_[3]{};
+};
+
+/**
+ * Media Information Header: Sound
+ */
+class Smhd : public Box {
+public:
+    static const uint32_t tag_ = 'smhd';
+
+    Smhd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        balance_ = file.readAsBigU16().value();
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "balance: " << balance_;
+        return ss.str();
+    }
+
+private:
+    uint16_t balance_ = 0;
+};
+
+/**
+ * Media Information Header: Hint
+ */
+class Hmhd : public Box {
+public:
+    static const uint32_t tag_ = 'hmhd';
+
+    Hmhd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        max_pdu_size_ = file.readAsBigU16().value();
+        avg_pdu_size_ = file.readAsBigU16().value();
+        max_bitrate_ = file.readAsBigU32().value();
+        avg_bitrate_ = file.readAsBigU32().value();
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "max pdu: " << max_pdu_size_
+           << ", avg pdu: " << avg_pdu_size_
+           << ", max bitrate: " << max_bitrate_
+           << ", avg bitrate: " << avg_bitrate_;
+        return ss.str();
+    }
+
+private:
+    uint16_t max_pdu_size_ = 0;
+    uint16_t avg_pdu_size_ = 0;
+    uint32_t max_bitrate_ = 0;
+    uint32_t avg_bitrate_ = 0;
+};
+
+class Durl : public Box {
+public:
+    static const uint32_t tag_ = 'url ';
+
+    Durl(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        auto strSize = offset_ + size_ - file.tell();
+        if (strSize > 0) {
+            location_.resize(strSize);
+            file.read(location_.data(), strSize, 1);
+            location_.back() = '\0';
+        }
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "location: ";
+        if (location_.empty()) {
+            ss << "null";
+        } else {
+            ss << location_.data();
+        }
+        return ss.str();
+    }
+
+private:
+    std::vector<char> location_;
+};
+
+class Dref : public Box {
+public:
+    static const uint32_t tag_ = 'dref';
+
+    Dref(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        entry_count_ = file.readAsBigU32().value();
+        parseChild(file);
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "entry count: " << entry_count_;
+        return ss.str();
+    }
+
+private:
+    uint32_t entry_count_ = 0;
+};
+
+class Dinf : public Box {
+public:
+    static const uint32_t tag_ = 'dinf';
+
+    Dinf(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
+    }
+};
+
+class Stsd : public Box {
+public:
+    static const uint32_t tag_ = 'stsd';
+
+    Stsd(const Box &box) : Box(box) {}
+};
+
+class Stbl : public Box {
+public:
+    static const uint32_t tag_ = 'stbl';
+
+    Stbl(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
+    }
+};
+
+/**
+ * Media Information Box
+ *
+ * Container: Media Box(mdia)
+ */
+class Minf : public Box {
+public:
+    static const uint32_t tag_ = 'minf';
+
+    Minf(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
+    }
+};
+
+class Mdia : public Box {
+public:
+    static const uint32_t tag_ = 'mdia';
+
+    Mdia(Box box) : Box(std::move(box)) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
     }
 };
 
 class Trak : public Box {
 public:
-    static const BaseType &type() {
-        static const auto t = str2BaseType("trak");
-        return t;
+    static const uint32_t tag_ = 'trak';
+
+    Trak(Box box) : Box(std::move(box)) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
     }
+};
+
+class Moov : public Box {
+public:
+    static const uint32_t tag_ = 'moov';
+
+    Moov(Box box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
+    }
+};
+
+class Mdat : public Box {
+public:
+    static const uint32_t tag_ = 'mdat';
+
+    Mdat(Box box) : Box(box) {}
 
     void parseInternal(FileOp &file) override {
     }
@@ -239,8 +693,8 @@ public:
 
 class Mp4Paser {
 public:
-    static Box::Boxs parse(const char *path) {
-        Box::Boxs boxes;
+    static Box::Boxes parse(const char *path) {
+        Box::Boxes boxes;
         FileOp file(path);
         if (!file.open("r"))
             return boxes;
@@ -256,16 +710,54 @@ public:
             }
         }
     }
-
-    static std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
-        if (base->baseType() == Moov::type()) {
-            return std::static_pointer_cast<Box>(std::make_shared<Moov>(*base));
-        } if (base->baseType() == Ftyp::type()) {
-            return std::static_pointer_cast<Box>(std::make_shared<Ftyp>(*base));
-        } else {
-            return std::move(base);
-        }
-    }
 };
+
+template <typename T>
+static std::shared_ptr<Box> toDetail(Box base) {
+    return std::static_pointer_cast<Box>(std::make_shared<T>(std::move(base)));
+}
+
+std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
+    switch (base->baseTypeTag()) {
+        case Dinf::tag_:
+            return toDetail<Dinf>(*base);
+        case Dref::tag_:
+            return toDetail<Dref>(*base);
+        case Durl::tag_:
+            return toDetail<Durl>(*base);
+        case Hmhd::tag_:
+            return toDetail<Hmhd>(*base);
+        case Mdhd::tag_:
+            return toDetail<Mdhd>(*base);
+        case Hdlr::tag_:
+            return toDetail<Hdlr>(*base);
+        case Minf::tag_:
+            return toDetail<Minf>(*base);
+        case Smhd::tag_:
+            return toDetail<Smhd>(*base);
+        case Stbl::tag_:
+            return toDetail<Stbl>(*base);
+        case Stsd::tag_:
+            return toDetail<Stsd>(*base);
+        case Vmhd::tag_:
+            return toDetail<Vmhd>(*base);
+        case Tkhd::tag_:
+            return toDetail<Tkhd>(*base);
+        case Mdia::tag_:
+            return toDetail<Mdia>(*base);
+        case Mvhd::tag_:
+            return toDetail<Mvhd>(*base);
+        case Trak::tag_:
+            return toDetail<Trak>(*base);
+        case Moov::tag_:
+            return toDetail<Moov>(*base);
+        case Ftyp::tag_:
+            return toDetail<Ftyp>(*base);
+        case Mdat::tag_:
+            return toDetail<Mdat>(*base);
+        default:
+            return base;
+    }
+}
 
 } // namespace mov
