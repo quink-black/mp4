@@ -232,6 +232,16 @@ public:
         return !children_.empty();
     }
 
+    Box *getAncestor(BaseType type) {
+        auto p = parent_;
+        while (p) {
+            if (p->type_ == type)
+                return p;
+            p = p->parent_;
+        }
+        return nullptr;
+    }
+
 protected:
     uint64_t size_ = 0;
     uint64_t offset_ = 0;
@@ -426,6 +436,9 @@ public:
         return ss.str();
     }
 
+    uint32_t timescale() {
+        return timescale_;
+    }
 private:
     uint64_t creation_time_ = 0;
     uint64_t modification_time_ = 0;
@@ -614,6 +627,90 @@ public:
     }
 };
 
+class Mdia : public Box {
+public:
+    static const uint32_t tag_ = 'mdia';
+
+    Mdia(Box box) : Box(std::move(box)) {}
+
+    void parseInternal(FileOp &file) override {
+        parseChild(file);
+    }
+
+    uint32_t getTimeScale() {
+        for (const auto &item : children_) {
+            if (item->baseType() == str2BaseType("mdhd")) {
+                return dynamic_cast<Mdhd*>(item.get())->timescale();
+            }
+        }
+        return 1;
+    }
+};
+
+/**
+ * Decoding time to sample box
+ *
+ * The decoding time is defined in decoding time to sample box, giving time
+ * deltas between successive decoding times.
+ *
+ * The time to sample boxes must give non-zero durations for all samples with
+ * the possible exception of the last one. Durations in the 'stts' box are
+ * strictly positive (non-zero), except for the very last entry, which may be
+ * zero.
+ *
+ * indexing from decoding time => sample number
+ *
+ */
+class Stts : public Box {
+public:
+    static const uint32_t tag_ = 'stts';
+
+    Stts(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        entry_count_ = file.readAsBigU32().value();
+        for (int i = 0; i < entry_count_; i++) {
+            auto count = file.readAsBigU32().value();
+            auto delta = file.readAsBigU32().value();
+            time_to_sample_table_.emplace_back(count, delta);
+        }
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "entry: " << entry_count_ << '\n';
+        auto mdia = getAncestor(str2BaseType("mdia"));
+        uint32_t timescale = 1;
+        if (mdia != nullptr) {
+            timescale = dynamic_cast<Mdia*>(mdia)->getTimeScale();
+        }
+        for (const auto &item : time_to_sample_table_) {
+            ss << "*** sample count: " << item.first
+               << " -> "
+               << "delta: " << item.second
+               << ", timescale: " << timescale
+               << '\n';
+        }
+        return ss.str();
+    }
+
+private:
+    uint32_t entry_count_ = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> time_to_sample_table_;
+};
+
+/**
+ * Composition time to sample box
+ *
+ * composition time offsets from decoding time.
+ */
+class Ctts : public Box {
+public:
+    static const uint32_t tag = 'ctts';
+    Ctts(const Box &box) : Box(box) {}
+};
+
 class Stsd : public Box {
 public:
     static const uint32_t tag_ = 'stsd';
@@ -621,6 +718,9 @@ public:
     Stsd(const Box &box) : Box(box) {}
 };
 
+/**
+ * Sample table box
+ */
 class Stbl : public Box {
 public:
     static const uint32_t tag_ = 'stbl';
@@ -642,17 +742,6 @@ public:
     static const uint32_t tag_ = 'minf';
 
     Minf(const Box &box) : Box(box) {}
-
-    void parseInternal(FileOp &file) override {
-        parseChild(file);
-    }
-};
-
-class Mdia : public Box {
-public:
-    static const uint32_t tag_ = 'mdia';
-
-    Mdia(Box box) : Box(std::move(box)) {}
 
     void parseInternal(FileOp &file) override {
         parseChild(file);
@@ -739,6 +828,8 @@ std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
             return toDetail<Stbl>(*base);
         case Stsd::tag_:
             return toDetail<Stsd>(*base);
+        case Stts::tag_:
+            return toDetail<Stts>(*base);
         case Vmhd::tag_:
             return toDetail<Vmhd>(*base);
         case Tkhd::tag_:
