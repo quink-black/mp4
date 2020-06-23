@@ -95,6 +95,7 @@ private:
 };
 
 class Box;
+
 std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base);
 
 class Box {
@@ -253,7 +254,13 @@ protected:
 
     Boxes children_;
     Box *parent_ = nullptr;
+    friend class Stsd;
 };
+
+template <typename T>
+static std::shared_ptr<Box> toDetail(Box base) {
+    return std::static_pointer_cast<Box>(std::make_shared<T>(std::move(base)));
+}
 
 class Ftyp : public Box {
 public:
@@ -472,6 +479,11 @@ public:
            << ", name: " << name_.data();
         return ss.str();
     }
+
+    BaseType handleType() {
+        return handler_type_;
+    }
+
 private:
     BaseType handler_type_{};
     std::vector<char> name_;
@@ -645,6 +657,15 @@ public:
         }
         return 1;
     }
+
+    BaseType handleType() {
+        for (const auto &item : children_) {
+            if (item->baseType() == str2BaseType("hdlr")) {
+                return dynamic_cast<Hdlr*>(item.get())->handleType();
+            }
+        }
+        return str2BaseType("und ");
+    }
 };
 
 /**
@@ -707,15 +728,175 @@ private:
  */
 class Ctts : public Box {
 public:
-    static const uint32_t tag = 'ctts';
+    static const uint32_t tag_ = 'ctts';
     Ctts(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        entry_count_ = file.readAsBigU32().value();
+        for (int i = 0; i < entry_count_; i++) {
+            auto count = file.readAsBigU32().value();
+            auto delta = file.readAsBigU32().value();
+            time_to_sample_table_.emplace_back(count, delta);
+        }
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "entry: " << entry_count_ << '\n';
+        auto mdia = getAncestor(str2BaseType("mdia"));
+        uint32_t timescale = 1;
+        if (mdia != nullptr) {
+            timescale = dynamic_cast<Mdia*>(mdia)->getTimeScale();
+        }
+        for (const auto &item : time_to_sample_table_) {
+            ss << "*** sample count: " << item.first
+               << " -> "
+               << "sample offset: " << item.second
+               << ", timescale: " << timescale
+               << '\n';
+        }
+        return ss.str();
+    }
+
+private:
+    uint32_t entry_count_ = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> time_to_sample_table_;
 };
 
+class SampleEntry : public Box {
+public:
+    SampleEntry(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        file.seek(6, SEEK_CUR);
+        data_reference_index_ = file.readAsBigU16().value();
+    }
+
+protected:
+    uint16_t data_reference_index_ = 0;
+};
+
+class VideoSampleEntry : public SampleEntry {
+public:
+    static const uint32_t tag_ = 'vide';
+
+    VideoSampleEntry(const Box &box) : SampleEntry(box) {}
+
+    void parseInternal(FileOp &file) override {
+        SampleEntry::parseInternal(file);
+        file.seek(2 + 2 + 12, SEEK_CUR);
+        width_ = file.readAsBigU16().value();
+        height_ = file.readAsBigU16().value();
+        horizresolution_ = file.readAsBigU32().value() / (1U << 16U);
+        vertresolution_ = file.readAsBigU32().value() / (1U << 16U);
+        file.readAsBigU32();
+        frame_count_ = file.readAsBigU16().value();
+        file.read(&compressor_name_len_, 1, 1);
+        compressor_name_.resize(31);
+        file.read(compressor_name_.data(), 31, 1);
+        depth_ = file.readAsBigU16().value();
+        file.readAsBigU16();
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "width: " << width_
+           << ", height: " << height_
+           << ", horiz resolu: " << horizresolution_
+           << ", vert resolu: " << vertresolution_
+           << ", frame cnt: " << frame_count_
+           << ", compressor name len: " << (int)compressor_name_len_;
+        if (compressor_name_len_ > 0) {
+            ss << ", compressor name: " << compressor_name_;
+        }
+        ss << ", depth: " << depth_;
+        return ss.str();
+    }
+
+private:
+    uint16_t width_ = 0;
+    uint16_t height_ = 0;
+    float horizresolution_ = 0;
+    float vertresolution_ = 0;
+    uint16_t frame_count_ = 1;
+    uint8_t compressor_name_len_ = 0;
+    std::string compressor_name_;
+    uint16_t depth_ = 0;
+};
+
+class AudioSampleEntry : public SampleEntry {
+public:
+    static const uint32_t tag = 'soun';
+
+    AudioSampleEntry(const Box &box) : SampleEntry(box) {}
+
+    void parseInternal(FileOp &file) override {
+        SampleEntry::parseInternal(file);
+        file.readAsBigU64();
+        channel_ = file.readAsBigU16().value();
+        samplesize_ = file.readAsBigU16().value();
+        file.readAsBigU32();
+        samplerate_ = (double)file.readAsBigU32().value() / (1U << 16U);
+    }
+
+    std::string detail() override {
+        std::ostringstream ss;
+        ss << "channel: " << channel_
+           << ", samplesize: " << samplesize_
+           << ", samplerate: " << samplerate_;
+        return ss.str();
+    }
+private:
+    uint16_t channel_ = 2;
+    uint16_t samplesize_ = 16;
+    float samplerate_ = 0;
+};
+
+/**
+ * Sample description box
+ *
+ * The sample description table gives detailed information about the coding
+ * type used, and any initialization information used for that coding.
+ */
 class Stsd : public Box {
 public:
     static const uint32_t tag_ = 'stsd';
 
     Stsd(const Box &box) : Box(box) {}
+
+    void parseInternal(FileOp &file) override {
+        parseFullBox(file);
+        entry_count_ = file.readAsBigU32().value();
+        auto end = offset_ + size_;
+        auto mdia = getAncestor(str2BaseType("mdia"));
+        auto handleType = dynamic_cast<Mdia*>(mdia)->handleType();
+        while (file.tell() < end) {
+            auto box = parseBasic(file);
+            if (box == nullptr) {
+                return;
+            }
+            box->parent_ = this;
+            std::shared_ptr<Box> detailBox;
+            if (handleType == str2BaseType("vide")) {
+                detailBox = toDetail<VideoSampleEntry>(*box);
+            } else if (handleType == str2BaseType("soun")) {
+                detailBox = toDetail<AudioSampleEntry>(*box);
+            } else {
+                detailBox = std::move(box);
+            }
+            detailBox->parseInternal(file);
+            children_.push_back(detailBox);
+            file.seek(detailBox->offset() + detailBox->size(), SEEK_SET);
+        }
+    }
+
+    std::string detail() override {
+        return std::string("entry: ") + std::to_string(entry_count_);
+    }
+
+private:
+    uint32_t entry_count_ = 0;
 };
 
 /**
@@ -801,13 +982,11 @@ public:
     }
 };
 
-template <typename T>
-static std::shared_ptr<Box> toDetail(Box base) {
-    return std::static_pointer_cast<Box>(std::make_shared<T>(std::move(base)));
-}
 
 std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
     switch (base->baseTypeTag()) {
+        case Ctts::tag_:
+            return toDetail<Ctts>(*base);
         case Dinf::tag_:
             return toDetail<Dinf>(*base);
         case Dref::tag_:
@@ -846,6 +1025,8 @@ std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
             return toDetail<Ftyp>(*base);
         case Mdat::tag_:
             return toDetail<Mdat>(*base);
+        case VideoSampleEntry::tag_:
+            return toDetail<VideoSampleEntry>(*base);
         default:
             return base;
     }

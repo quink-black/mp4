@@ -8,9 +8,13 @@ void dumpBox(const mov::Box::Boxes &boxes, int depth = 0) {
         std::cout << std::string(depth, '\t')
                   << "type " << box->baseTypeStr()
                   << ", offset " << box->offset()
-                  << ", size " << box->size()
-                  << ", " << box->detail()
-                  << '\n';
+                  << ", size " << box->size();
+        bool skip_ctts = true;
+        if (skip_ctts && box->baseTypeStr() == "ctts") {
+            std::cout << '\n';
+            continue;
+        }
+        std::cout << ", " << box->detail() << '\n';
         if (box->hasChild()) {
             dumpBox(box->children(), depth + 1);
         }
