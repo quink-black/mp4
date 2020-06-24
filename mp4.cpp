@@ -6,11 +6,11 @@
 void dumpBox(const mov::Box::Boxes &boxes, int depth = 0) {
     for (const auto &box : boxes) {
         std::cout << std::string(depth, '\t')
-                  << "type " << box->baseTypeStr()
+                  << "type " << box->boxTypeStr()
                   << ", offset " << box->offset()
                   << ", size " << box->size();
         bool skip_ctts = true;
-        if (skip_ctts && box->baseTypeStr() == "ctts") {
+        if (skip_ctts && box->boxTypeStr() == "ctts") {
             std::cout << '\n';
             continue;
         }

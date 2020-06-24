@@ -101,7 +101,6 @@ std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base);
 
 class Box {
 public:
-    using BaseType = std::array<char, 4>;
     using ExtendedType = std::array<char, 16>;
     using Boxes = std::vector<std::shared_ptr<Box>>;
 
@@ -109,7 +108,7 @@ public:
     public:
         uint64_t size_ = 0;
         uint64_t offset_ = 0;
-        BaseType type_{};
+        uint32_t type_{};
         ExtendedType extended_type_{};
 
         std::unique_ptr<Box> build() {
@@ -118,33 +117,22 @@ public:
     };
 
     Box(uint64_t size, uint64_t offset,
-        BaseType type, ExtendedType extended_type)
+        uint32_t type, ExtendedType extended_type)
             : size_(size), offset_(offset),
               type_(type), extended_type_(extended_type) {
     }
 
-    static constexpr BaseType str2BaseType(const char (&str)[5]) {
-        return BaseType{str[0], str[1], str[2], str[3]};
+    static constexpr uint32_t str2BoxType(const char (&buf)[5]) {
+        return (uint32_t)buf[3] << 24U | (uint32_t)buf[2] << 16U | (uint32_t)buf[1] << 8U | buf[0];
     }
 
-    static std::string baseType2str(BaseType baseType) {
-        return std::string(baseType.begin(), baseType.end());
+    static std::string boxType2Str(uint32_t baseType) {
+        char *p = reinterpret_cast<char*>(&baseType);
+        return std::string(p, 4);
     }
 
-    static uint32_t baseType2Tag(BaseType baseType) {
-        return buf2UInt32(reinterpret_cast<uint8_t*>(baseType.data()));
-    }
-
-    static uint32_t baseType2Uint32(BaseType baseType) {
-        return buf2UInt32(reinterpret_cast<uint8_t*>(baseType.data()));
-    }
-
-    std::string baseTypeStr() {
-        return baseType2str(type_);
-    }
-
-    uint32_t baseTypeTag() {
-        return baseType2Tag(type_);
+    std::string boxTypeStr() {
+        return boxType2Str(type_);
     }
 
     static std::unique_ptr<Box> parseBasic(FileOp &in) {
@@ -158,7 +146,7 @@ public:
             return nullptr;
         }
 
-        if (!in.read(builder.type_.data(), 4, 1)) {
+        if (!in.read(&builder.type_, sizeof(builder.type_), 1)) {
             return nullptr;
         }
         if (builder.size_ == 1) {
@@ -169,7 +157,7 @@ public:
                 return nullptr;
             }
         }
-        if (builder.type_ == str2BaseType("uuid")) {
+        if (builder.type_ == str2BoxType("uuid")) {
             if (!in.read(builder.extended_type_.data(), 16, 1)) {
                 return nullptr;
             }
@@ -218,7 +206,7 @@ public:
         return offset_;
     }
 
-    BaseType baseType() const {
+    uint32_t baseType() const {
         return type_;
     }
 
@@ -234,7 +222,7 @@ public:
         return !children_.empty();
     }
 
-    Box *getAncestor(BaseType type) {
+    Box *getAncestor(uint32_t type) {
         auto p = parent_;
         while (p) {
             if (p->type_ == type)
@@ -247,7 +235,7 @@ public:
 protected:
     uint64_t size_ = 0;
     uint64_t offset_ = 0;
-    BaseType type_{};
+    uint32_t type_{};
     ExtendedType extended_type_{};
 
     uint8_t fullbox_version_ = 0;
@@ -265,15 +253,15 @@ static std::shared_ptr<Box> toDetail(Box base) {
 
 class Ftyp : public Box {
 public:
-    static const uint32_t tag_ = 'ftyp';
+    static const uint32_t tag_ = str2BoxType("ftyp");
 
     Ftyp(const Box &box) : Box(box) { }
 
     void parseInternal(FileOp &file) override {
         auto remain = size_ - (file.tell() - offset_);
-        if (remain >= major_brand_.size()) {
-            file.read(major_brand_.data(), major_brand_.size(), 1);
-            remain -= major_brand_.size();
+        if (remain >= 4) {
+            file.read(&major_brand_, 4, 1);
+            remain -= 4;
         }
         if (remain >= 4) {
             minor_version = file.readAsBigU32().value();
@@ -282,32 +270,30 @@ public:
         remain /= 4;
         if (remain > 0) {
             compatible_brands_.resize(remain);
-            for (int i = 0; i < remain; i++) {
-                file.read(compatible_brands_[i].data(), 4, 1);
-            }
+            file.read(compatible_brands_.data(), 4 * remain, 1);
         }
     }
 
     std::string detail() override {
         std::ostringstream ss;
-        ss << "major brand: " << baseType2str(major_brand_)
+        ss << "major brand: " << boxType2Str(major_brand_)
             << ", minor version: " << minor_version
             << ", compatible_brands_: ";
-        for (const auto &n : compatible_brands_) {
-            ss << baseType2str(n) << " ";
+        for (const auto n : compatible_brands_) {
+            ss << boxType2Str(n) << " ";
         }
         return ss.str();
     }
 
 private:
-    BaseType major_brand_{};
+    uint32_t major_brand_;
     uint32_t minor_version = 0;
-    std::vector<BaseType> compatible_brands_{};
+    std::vector<uint32_t> compatible_brands_{};
 };
 
 class Mvhd : public Box {
 public:
-    static const uint32_t tag_ = 'mvhd';
+    static const uint32_t tag_ = str2BoxType("mvhd");
 
     Mvhd(const Box &box) : Box(box) {}
 
@@ -354,7 +340,7 @@ private:
 
 class Tkhd : public Box {
 public:
-    static const uint32_t tag_ = 'tkhd';
+    static const uint32_t tag_ = str2BoxType("tkhd");
 
     Tkhd(const Box &box) : Box(box) {}
 
@@ -410,7 +396,7 @@ private:
 // Media Header
 class Mdhd : public Box {
 public:
-    static const uint32_t tag_ = 'mdhd';
+    static const uint32_t tag_ = str2BoxType("mdhd");
 
     Mdhd(const Box &box) : Box(box) {}
 
@@ -458,14 +444,14 @@ private:
 // Handler reference box
 class Hdlr : public Box {
 public:
-    static const uint32_t tag_ = 'hdlr';
+    static const uint32_t tag_ = str2BoxType("hdlr");
 
     Hdlr(const Box &box) : Box(box) {}
 
     void parseInternal(FileOp &file) override {
         parseFullBox(file);
         file.readAsBigU32();
-        file.read(handler_type_.data(), handler_type_.size(), 1);
+        file.read(&handler_type_, sizeof(handler_type_), 1);
         file.readAsBigU32();
         file.readAsBigU64();
         auto strSize = offset_ + size_ - file.tell();
@@ -476,17 +462,17 @@ public:
 
     std::string detail() override {
         std::ostringstream ss;
-        ss << "handler type: " << baseType2str(handler_type_)
+        ss << "handler type: " << boxType2Str(handler_type_)
            << ", name: " << name_.data();
         return ss.str();
     }
 
-    BaseType handleType() {
+    uint32_t handleType() {
         return handler_type_;
     }
 
 private:
-    BaseType handler_type_{};
+    uint32_t handler_type_{};
     std::vector<char> name_;
 };
 
@@ -495,7 +481,7 @@ private:
  */
 class Vmhd : public Box {
 public:
-    static const uint32_t tag_ = 'vmhd';
+    static const uint32_t tag_ = str2BoxType("vmhd");
 
     Vmhd(const Box &box) : Box(box) {}
 
@@ -524,7 +510,7 @@ private:
  */
 class Smhd : public Box {
 public:
-    static const uint32_t tag_ = 'smhd';
+    static const uint32_t tag_ = str2BoxType("smhd");
 
     Smhd(const Box &box) : Box(box) {}
 
@@ -548,7 +534,7 @@ private:
  */
 class Hmhd : public Box {
 public:
-    static const uint32_t tag_ = 'hmhd';
+    static const uint32_t tag_ = str2BoxType("hmhd");
 
     Hmhd(const Box &box) : Box(box) {}
 
@@ -578,7 +564,7 @@ private:
 
 class Durl : public Box {
 public:
-    static const uint32_t tag_ = 'url ';
+    static const uint32_t tag_ = str2BoxType("url ");
 
     Durl(const Box &box) : Box(box) {}
 
@@ -609,7 +595,7 @@ private:
 
 class Dref : public Box {
 public:
-    static const uint32_t tag_ = 'dref';
+    static const uint32_t tag_ = str2BoxType("dref");
 
     Dref(const Box &box) : Box(box) {}
 
@@ -631,7 +617,7 @@ private:
 
 class Dinf : public Box {
 public:
-    static const uint32_t tag_ = 'dinf';
+    static const uint32_t tag_ = str2BoxType("dinf");
 
     Dinf(const Box &box) : Box(box) {}
 
@@ -642,7 +628,7 @@ public:
 
 class Mdia : public Box {
 public:
-    static const uint32_t tag_ = 'mdia';
+    static const uint32_t tag_ = str2BoxType("mdia");
 
     Mdia(Box box) : Box(std::move(box)) {}
 
@@ -652,20 +638,20 @@ public:
 
     uint32_t getTimeScale() {
         for (const auto &item : children_) {
-            if (item->baseType() == str2BaseType("mdhd")) {
+            if (item->baseType() == str2BoxType("mdhd")) {
                 return dynamic_cast<Mdhd*>(item.get())->timescale();
             }
         }
         return 1;
     }
 
-    BaseType handleType() {
+    uint32_t handleType() {
         for (const auto &item : children_) {
-            if (item->baseType() == str2BaseType("hdlr")) {
+            if (item->baseType() == str2BoxType("hdlr")) {
                 return dynamic_cast<Hdlr*>(item.get())->handleType();
             }
         }
-        return str2BaseType("und ");
+        return str2BoxType("und ");
     }
 };
 
@@ -685,7 +671,7 @@ public:
  */
 class Stts : public Box {
 public:
-    static const uint32_t tag_ = 'stts';
+    static const uint32_t tag_ = str2BoxType("stts");
 
     Stts(const Box &box) : Box(box) {}
 
@@ -702,7 +688,7 @@ public:
     std::string detail() override {
         std::ostringstream ss;
         ss << "entry: " << entry_count_ << '\n';
-        auto mdia = getAncestor(str2BaseType("mdia"));
+        auto mdia = getAncestor(str2BoxType("mdia"));
         uint32_t timescale = 1;
         if (mdia != nullptr) {
             timescale = dynamic_cast<Mdia*>(mdia)->getTimeScale();
@@ -729,7 +715,8 @@ private:
  */
 class Ctts : public Box {
 public:
-    static const uint32_t tag_ = 'ctts';
+    static const uint32_t tag_ = str2BoxType("ctts");
+
     Ctts(const Box &box) : Box(box) {}
 
     void parseInternal(FileOp &file) override {
@@ -745,7 +732,7 @@ public:
     std::string detail() override {
         std::ostringstream ss;
         ss << "entry: " << entry_count_ << '\n';
-        auto mdia = getAncestor(str2BaseType("mdia"));
+        auto mdia = getAncestor(str2BoxType("mdia"));
         uint32_t timescale = 1;
         if (mdia != nullptr) {
             timescale = dynamic_cast<Mdia*>(mdia)->getTimeScale();
@@ -780,8 +767,6 @@ protected:
 
 class VideoSampleEntry : public SampleEntry {
 public:
-    static const uint32_t tag_ = 'vide';
-
     VideoSampleEntry(const Box &box) : SampleEntry(box) {}
 
     void parseInternal(FileOp &file) override {
@@ -828,8 +813,6 @@ private:
 
 class AudioSampleEntry : public SampleEntry {
 public:
-    static const uint32_t tag = 'soun';
-
     AudioSampleEntry(const Box &box) : SampleEntry(box) {}
 
     void parseInternal(FileOp &file) override {
@@ -862,7 +845,7 @@ private:
  */
 class Stsd : public Box {
 public:
-    static const uint32_t tag_ = 'stsd';
+    static const uint32_t tag_ = str2BoxType("stsd");
 
     Stsd(const Box &box) : Box(box) {}
 
@@ -870,7 +853,7 @@ public:
         parseFullBox(file);
         entry_count_ = file.readAsBigU32().value();
         auto end = offset_ + size_;
-        auto mdia = getAncestor(str2BaseType("mdia"));
+        auto mdia = getAncestor(str2BoxType("mdia"));
         auto handleType = dynamic_cast<Mdia*>(mdia)->handleType();
         while (file.tell() < end) {
             auto box = parseBasic(file);
@@ -879,9 +862,9 @@ public:
             }
             box->parent_ = this;
             std::shared_ptr<Box> detailBox;
-            if (handleType == str2BaseType("vide")) {
+            if (handleType == str2BoxType("vide")) {
                 detailBox = toDetail<VideoSampleEntry>(*box);
-            } else if (handleType == str2BaseType("soun")) {
+            } else if (handleType == str2BoxType("soun")) {
                 detailBox = toDetail<AudioSampleEntry>(*box);
             } else {
                 detailBox = std::move(box);
@@ -905,7 +888,7 @@ private:
  */
 class Stbl : public Box {
 public:
-    static const uint32_t tag_ = 'stbl';
+    static const uint32_t tag_ = str2BoxType("stbl");
 
     Stbl(const Box &box) : Box(box) {}
 
@@ -921,7 +904,7 @@ public:
  */
 class Minf : public Box {
 public:
-    static const uint32_t tag_ = 'minf';
+    static const uint32_t tag_ = str2BoxType("minf");
 
     Minf(const Box &box) : Box(box) {}
 
@@ -932,7 +915,7 @@ public:
 
 class Trak : public Box {
 public:
-    static const uint32_t tag_ = 'trak';
+    static const uint32_t tag_ = str2BoxType("trak");
 
     Trak(Box box) : Box(std::move(box)) {}
 
@@ -943,7 +926,7 @@ public:
 
 class Moov : public Box {
 public:
-    static const uint32_t tag_ = 'moov';
+    static const uint32_t tag_ = str2BoxType("moov");
 
     Moov(Box box) : Box(box) {}
 
@@ -954,7 +937,7 @@ public:
 
 class Mdat : public Box {
 public:
-    static const uint32_t tag_ = 'mdat';
+    static const uint32_t tag_ = str2BoxType("mdat");
 
     Mdat(Box box) : Box(box) {}
 
@@ -985,7 +968,7 @@ public:
 
 
 std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
-    switch (base->baseTypeTag()) {
+    switch (base->baseType()) {
         case Ctts::tag_:
             return toDetail<Ctts>(*base);
         case Dinf::tag_:
@@ -1026,8 +1009,6 @@ std::shared_ptr<Box> toDetailType(std::unique_ptr<Box> base) {
             return toDetail<Ftyp>(*base);
         case Mdat::tag_:
             return toDetail<Mdat>(*base);
-        case VideoSampleEntry::tag_:
-            return toDetail<VideoSampleEntry>(*base);
         default:
             return base;
     }
