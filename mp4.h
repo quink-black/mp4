@@ -1,4 +1,7 @@
 #include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <algorithm>
 #include <array>
@@ -59,7 +62,13 @@ public:
         return fread(ptr, size, nitems, file_);
     }
 
-    off_t tell() { return ftello(file_); }
+    size_t tell() {
+        auto ret = ftello(file_);
+        if (ret == -1) {
+            throw std::ios_base::failure(strerror(errno));
+        }
+        return ret;
+    }
 
     int seek(off_t offset, int whence) { return fseeko(file_, offset, whence); }
 
@@ -120,6 +129,8 @@ public:
           type_(type),
           extended_type_(extended_type) {}
 
+    virtual ~Box() = default;
+
     static constexpr uint32_t str2BoxType(const char (&buf)[5]) {
         return (uint32_t)buf[3] << 24U | (uint32_t)buf[2] << 16U |
                (uint32_t)buf[1] << 8U | buf[0];
@@ -173,7 +184,7 @@ public:
         }
     }
 
-    virtual void parseInternal(FileOp &file) {}
+    virtual void parseInternal(FileOp &) {}
 
     void parseChild(FileOp &file) {
         auto end = offset_ + size_;
@@ -643,7 +654,7 @@ public:
     void parseInternal(FileOp &file) override {
         parseFullBox(file);
         entry_count_ = file.readAsBigU32().value();
-        for (int i = 0; i < entry_count_; i++) {
+        for (unsigned i = 0; i < entry_count_; i++) {
             auto count = file.readAsBigU32().value();
             auto delta = file.readAsBigU32().value();
             time_to_sample_table_.emplace_back(count, delta);
@@ -685,7 +696,7 @@ public:
     void parseInternal(FileOp &file) override {
         parseFullBox(file);
         entry_count_ = file.readAsBigU32().value();
-        for (int i = 0; i < entry_count_; i++) {
+        for (unsigned i = 0; i < entry_count_; i++) {
             auto count = file.readAsBigU32().value();
             auto delta = file.readAsBigU32().value();
             time_to_sample_table_.emplace_back(count, delta);
@@ -1030,7 +1041,7 @@ public:
 
     Mdat(Box box) : Box(box) {}
 
-    void parseInternal(FileOp &file) override {}
+    void parseInternal(FileOp &) override {}
 };
 
 class Mp4Paser {
