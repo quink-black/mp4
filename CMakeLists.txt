@@ -14,6 +14,7 @@ find_package(Threads)
 
 add_executable(mp4 mp4.cpp)
 add_executable(lang lang.cpp)
+add_executable(lang2 lang2.cpp)
 
 add_custom_target(commands_json ALL
     COMMAND cp "compile_commands.json" "${CMAKE_SOURCE_DIR}/"
