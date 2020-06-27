@@ -1,12 +1,8 @@
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
-struct MacintoshLanguageCodes {
-    int value;
-    std::string name;
-};
-
-const MacintoshLanguageCodes table[] = {
+static const std::unordered_map<int, std::string> MacintoshLanguageCodes{
     {0, "English"},       {1, "French"},
     {2, "German"},        {3, "Italian"},
     {4, "Dutch"},         {5, "Swedish"},
@@ -241,24 +237,33 @@ static const iso639_lang_t p_languages[] = {
 };
 
 void test() {
-    for (const auto &item : table) {
-        auto found = false;
-        for (const auto &lan : p_languages) {
-            if (std::string(lan.psz_eng_name).find(item.name) !=
-                std::string::npos) {
-                std::cout << "index: " << item.value << ", name: " << item.name
-                          << ", code: " << lan.psz_iso639_2T << '\n';
-                found = true;
-                break;
+    for (int i = 0; i < 140; i++) {
+        if (i % 10 == 0) std::cout << '\n' << i << ": ";
+        auto iter = MacintoshLanguageCodes.find(i);
+        if (iter != MacintoshLanguageCodes.end()) {
+            auto found = false;
+            for (const auto &lan : p_languages) {
+                if (std::string(lan.psz_eng_name).find(iter->second) !=
+                    std::string::npos) {
+                    std::cout << " [" << iter->second << ", "
+                              << lan.psz_iso639_2T << "]";
+                    found = true;
+                    break;
+                }
             }
-        }
-        if (!found) {
-            std::cerr << "not found for " << item.name << '\n';
+            if (!found) {
+                std::cout << " [" << iter->second << ", "
+                          << "***] ";
+            }
+        } else {
+            std::cout << " [xxxx]";
         }
     }
+    std::cout << '\n';
 }
 
 int main() {
     test();
+
     return 0;
 }
