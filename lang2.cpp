@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <string>
 #include <unordered_map>
 
 static std::unordered_map<int, std::string> MacintoshLanguageCodes{
