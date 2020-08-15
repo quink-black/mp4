@@ -2,14 +2,13 @@
 
 #include <getopt.h>
 #include <stdlib.h>
+
 #include <iostream>
 
 void dumpBox(const mov::Box::Boxes &boxes, bool verbose, int depth = 0) {
     for (const auto &box : boxes) {
-        std::cout << std::string(depth * 4, ' ')
-                  << "type " << box->boxTypeStr()
-                  << ", offset " << box->offset()
-                  << ", size " << box->size();
+        std::cout << std::string(depth * 4, ' ') << "type " << box->boxTypeStr()
+                  << ", offset " << box->offset() << ", size " << box->size();
         auto detail = box->detail();
         if (verbose) {
             std::cout << ", " << box->detail() << '\n';
@@ -19,7 +18,7 @@ void dumpBox(const mov::Box::Boxes &boxes, bool verbose, int depth = 0) {
                 std::cout << ", " << detail.substr(0, second_newline)
                           << " ...\n";
             } else {
-                std::cout << detail << '\n';
+                std::cout << ", " << detail << '\n';
             }
         }
         if (box->hasChild()) {
